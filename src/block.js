@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import Transaction from "./transaction.js";
 
 class Block {
   #version;
@@ -13,24 +14,34 @@ class Block {
   #publicKey;
   #signature;
 
-  constructor(version, prevHash, transactions, difficultyTarget) {
-    this.version = version;
-    this.prevHash = prevHash;
-    this.transactions = transactions;
-    this.difficultyTarget = difficultyTarget;
-    this.timestamp = Date.now();
-    this.nonce = 0;
-    this.merkleRoot = this.calculateMerkleRoot();
-    this.blockHash = this.calculateHash();
+  constructor(version, prevHash, transactions, difficultyTarget = 4, restoredData = null) {
+    this.#version = version;
+    this.#prevHash = prevHash;
+    this.#transactions = transactions;
+    this.#difficultyTarget = difficultyTarget;
 
-    const keys = crypto.generateKeyPairSync("ec", {
-      namedCurve: "secp256k1",
-    });
+    if (restoredData) {
+      // Відновлення блоку, отриманого по мережі
+      this.#timestamp = restoredData.timestamp;
+      this.#nonce = restoredData.nonce;
+      this.#merkleRoot = restoredData.merkleRoot;
+      this.#blockHash = restoredData.blockHash;
+      this.#signature = restoredData.signature;
+      this.#publicKey = restoredData.publicKey;
+      this.#privateKey = null;
+    } else {
+      // Створення нового блоку для майнінгу
+      this.#timestamp = Date.now();
+      this.#nonce = 0;
+      this.#merkleRoot = this.calculateMerkleRoot();
+      this.#blockHash = "";
 
-    this.#privateKey = keys.privateKey;
-    this.#publicKey = keys.publicKey;
-
-    this.signBlock();
+      const keys = crypto.generateKeyPairSync("ec", {
+        namedCurve: "secp256k1",
+      });
+      this.#privateKey = keys.privateKey;
+      this.#publicKey = keys.publicKey;
+    }
   }
 
   calculateHashPair(hash1, hash2) {
@@ -41,7 +52,7 @@ class Block {
   }
 
   calculateMerkleRoot() {
-    let hashes = this.transactions.map((tx) => tx.txHash);
+    let hashes = this.#transactions.map((tx) => tx.txHash);
 
     if (hashes.length === 0) {
       return crypto.createHash("sha256").update("").digest("hex");
@@ -65,130 +76,153 @@ class Block {
 
   calculateHash() {
     const data = JSON.stringify({
-      version: this.version,
-      prevHash: this.prevHash,
-      timestamp: this.timestamp,
-      difficultyTarget: this.difficultyTarget,
-      nonce: this.nonce,
-      merkleRoot: this.merkleRoot,
+      version: this.#version,
+      prevHash: this.#prevHash,
+      timestamp: this.#timestamp,
+      difficultyTarget: this.#difficultyTarget,
+      nonce: this.#nonce,
+      merkleRoot: this.#merkleRoot,
     });
 
     return crypto.createHash("sha256").update(data).digest("hex");
   }
 
+  mine() {
+    const targetPrefix = "0".repeat(this.#difficultyTarget);
+    console.log(`[MINING] Пошук хешу зі складністю ${this.#difficultyTarget} нулів...`);
+    const startTime = Date.now();
+
+    while (true) {
+      this.#blockHash = this.calculateHash();
+      if (this.#blockHash.startsWith(targetPrefix)) {
+        break;
+      }
+      this.#nonce++;
+    }
+
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(
+      `[MINED] Блок знайдено!\n` +
+      `  Хеш:   ${this.#blockHash}\n` +
+      `  Nonce: ${this.#nonce}\n` +
+      `  Час:   ${duration} сек.`
+    );
+
+    this.signBlock();
+  }
+
   signBlock() {
+    if (!this.#privateKey) return;
     this.#signature = crypto.sign(
       "sha256",
-      Buffer.from(this.blockHash),
+      Buffer.from(this.#blockHash),
       this.#privateKey,
     );
   }
 
   verifySignature() {
-    return crypto.verify(
-      "sha256",
-      Buffer.from(this.blockHash),
-      this.#publicKey,
-      this.#signature,
-    );
+    if (!this.#signature || !this.#blockHash || !this.#publicKey) {
+      return false;
+    }
+
+    try {
+      const key =
+        typeof this.#publicKey === "string"
+          ? crypto.createPublicKey(this.#publicKey)
+          : this.#publicKey;
+
+      const sigBuffer = Buffer.isBuffer(this.#signature)
+        ? this.#signature
+        : Buffer.from(this.#signature, "hex");
+
+      return crypto.verify(
+        "sha256",
+        Buffer.from(this.#blockHash),
+        key,
+        sigBuffer,
+      );
+    } catch {
+      return false;
+    }
   }
 
   verifyBlock() {
     const currentHash = this.calculateHash();
-
     const currentMerkleRoot = this.calculateMerkleRoot();
+    const targetPrefix = "0".repeat(this.#difficultyTarget);
+
+    const isHashValid = currentHash === this.#blockHash;
+    const isDifficultySatisfied = this.#blockHash.startsWith(targetPrefix);
+    const isMerkleRootValid = currentMerkleRoot === this.#merkleRoot;
+    const isSignatureValid = this.verifySignature();
 
     return (
-      currentHash === this.blockHash &&
-      currentMerkleRoot === this.merkleRoot &&
-      this.verifySignature()
+      isHashValid &&
+      isDifficultySatisfied &&
+      isMerkleRootValid &&
+      isSignatureValid
+    );
+  }
+
+  getPublicKeyPem() {
+    if (!this.#publicKey) return "";
+    if (typeof this.#publicKey === "string") return this.#publicKey;
+    return this.#publicKey.export({ type: "spki", format: "pem" });
+  }
+
+  getSignatureHex() {
+    if (!this.#signature) return "";
+    return Buffer.isBuffer(this.#signature)
+      ? this.#signature.toString("hex")
+      : this.#signature;
+  }
+
+  static fromJSON(data) {
+    const txs = data.transactions.map((t) =>
+      typeof t === "string" ? Transaction.fromJSON(JSON.parse(t)) : Transaction.fromJSON(t)
+    );
+
+    return new Block(
+      data.version,
+      data.prevHash,
+      txs,
+      data.difficultyTarget,
+      {
+        timestamp: data.timestamp,
+        nonce: data.nonce,
+        merkleRoot: data.merkleRoot,
+        blockHash: data.blockHash,
+        signature: data.signature,
+        publicKey: data.publicKey,
+      }
     );
   }
 
   toString() {
     return JSON.stringify({
-      version: this.version,
-      prevHash: this.prevHash,
-      timestamp: this.timestamp,
-      difficultyTarget: this.difficultyTarget,
-      nonce: this.nonce,
-      merkleRoot: this.merkleRoot,
-      transactions: this.transactions.map((tx) => tx.toString()),
-      blockHash: this.blockHash,
+      version: this.#version,
+      prevHash: this.#prevHash,
+      timestamp: this.#timestamp,
+      difficultyTarget: this.#difficultyTarget,
+      nonce: this.#nonce,
+      merkleRoot: this.#merkleRoot,
+      transactions: this.#transactions.map((tx) => tx.toString()),
+      blockHash: this.#blockHash,
+      signature: this.getSignatureHex(),
+      publicKey: this.getPublicKeyPem(),
     });
   }
 
-  get version() {
-    return this.#version;
-  }
-
-  set version(value) {
-    this.#version = value;
-  }
-
-  get prevHash() {
-    return this.#prevHash;
-  }
-
-  set prevHash(value) {
-    this.#prevHash = value;
-  }
-
-  get timestamp() {
-    return this.#timestamp;
-  }
-
-  set timestamp(value) {
-    this.#timestamp = value;
-  }
-
-  get difficultyTarget() {
-    return this.#difficultyTarget;
-  }
-
-  set difficultyTarget(value) {
-    this.#difficultyTarget = value;
-  }
-
-  get nonce() {
-    return this.#nonce;
-  }
-
-  set nonce(value) {
-    this.#nonce = value;
-  }
-
-  get merkleRoot() {
-    return this.#merkleRoot;
-  }
-
-  set merkleRoot(value) {
-    this.#merkleRoot = value;
-  }
-
-  get transactions() {
-    return this.#transactions;
-  }
-
-  set transactions(value) {
-    this.#transactions = value;
-  }
-
-  get blockHash() {
-    return this.#blockHash;
-  }
-
-  set blockHash(value) {
-    this.#blockHash = value;
-  }
-
-  get signature() {
-    return this.#signature;
-  }
-
-  set signature(value) {
-    this.#signature = value;
-  }
+  get version() { return this.#version; }
+  get prevHash() { return this.#prevHash; }
+  get timestamp() { return this.#timestamp; }
+  get difficultyTarget() { return this.#difficultyTarget; }
+  get nonce() { return this.#nonce; }
+  get merkleRoot() { return this.#merkleRoot; }
+  get transactions() { return this.#transactions; }
+  get blockHash() { return this.#blockHash; }
+  get signature() { return this.#signature; }
+  get publicKey() { return this.#publicKey; }
 }
 
 export default Block;

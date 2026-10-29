@@ -10,110 +10,115 @@ class Transaction {
   #publicKey;
   #signature;
 
-  constructor(input, output, amount) {
-    this.input = input;
-    this.output = output;
-    this.amount = amount;
-    this.txTimestamp = Date.now();
-    this.txHash = this.calculateHash();
+  constructor(input, output, amount, restoredData = null) {
+    this.#input = input;
+    this.#output = output;
+    this.#amount = amount;
 
-    const keys = crypto.generateKeyPairSync("ec", {
-      namedCurve: "secp256k1",
-    });
-    this.#privateKey = keys.privateKey;
-    this.#publicKey = keys.publicKey;
-    this.signTransaction();
+    if (restoredData) {
+      // Відновлення транзакції, отриманої через сокет
+      this.#txTimestamp = restoredData.txTimestamp;
+      this.#txHash = restoredData.txHash;
+      this.#publicKey = restoredData.publicKey;
+      this.#signature = restoredData.signature;
+      this.#privateKey = null;
+    } else {
+      // Створення абсолютно нової транзакції
+      this.#txTimestamp = Date.now();
+      this.#txHash = this.calculateHash();
+
+      const keys = crypto.generateKeyPairSync("ec", {
+        namedCurve: "secp256k1",
+      });
+      this.#privateKey = keys.privateKey;
+      this.#publicKey = keys.publicKey;
+      this.signTransaction();
+    }
   }
 
   calculateHash() {
     const data = JSON.stringify({
-      input: this.input,
-      output: this.output,
-      amount: this.amount,
-      txTimestamp: this.txTimestamp,
+      input: this.#input,
+      output: this.#output,
+      amount: this.#amount,
+      txTimestamp: this.#txTimestamp,
     });
 
-    const hash = crypto.createHash("sha256");
-    hash.update(data);
-    const res = hash.digest("hex");
-    return res;
+    return crypto.createHash("sha256").update(data).digest("hex");
   }
 
   verifyHash() {
-    const currentHash = this.calculateHash();
-    return currentHash === this.txHash;
+    return this.calculateHash() === this.#txHash;
   }
 
   signTransaction() {
+    if (!this.#privateKey) return;
     this.#signature = crypto.sign(
       "sha256",
-      Buffer.from(this.txHash),
+      Buffer.from(this.#txHash),
       this.#privateKey,
     );
   }
 
   verifySignature() {
-    return crypto.verify(
-      "sha256",
-      Buffer.from(this.txHash),
-      this.#publicKey,
-      this.#signature,
-    );
+    if (!this.#signature || !this.#publicKey) return false;
+
+    try {
+      const key =
+        typeof this.#publicKey === "string"
+          ? crypto.createPublicKey(this.#publicKey)
+          : this.#publicKey;
+
+      const sigBuffer = Buffer.isBuffer(this.#signature)
+        ? this.#signature
+        : Buffer.from(this.#signature, "hex");
+
+      return crypto.verify("sha256", Buffer.from(this.#txHash), key, sigBuffer);
+    } catch {
+      return false;
+    }
+  }
+
+  getPublicKeyPem() {
+    if (typeof this.#publicKey === "string") return this.#publicKey;
+    return this.#publicKey.export({ type: "spki", format: "pem" });
+  }
+
+  getSignatureHex() {
+    if (!this.#signature) return "";
+    return Buffer.isBuffer(this.#signature)
+      ? this.#signature.toString("hex")
+      : this.#signature;
+  }
+
+  static fromJSON(data) {
+    return new Transaction(data.input, data.output, data.amount, {
+      txTimestamp: data.txTimestamp,
+      txHash: data.txHash,
+      publicKey: data.publicKey,
+      signature: data.signature,
+    });
   }
 
   toString() {
     return JSON.stringify({
-      input: this.input,
-      output: this.output,
-      amount: this.amount,
-      txTimestamp: this.txTimestamp,
-      txHash: this.txHash,
+      input: this.#input,
+      output: this.#output,
+      amount: this.#amount,
+      txTimestamp: this.#txTimestamp,
+      txHash: this.#txHash,
+      publicKey: this.getPublicKeyPem(),
+      signature: this.getSignatureHex(),
     });
   }
 
-  get input() {
-    return this.#input;
-  }
-
-  set input(value) {
-    this.#input = value;
-  }
-
-  get output() {
-    return this.#output;
-  }
-
-  set output(value) {
-    this.#output = value;
-  }
-
-  get amount() {
-    return this.#amount;
-  }
-
-  set amount(value) {
-    this.#amount = value;
-  }
-
-  get txTimestamp() {
-    return this.#txTimestamp;
-  }
-
-  set txTimestamp(value) {
-    this.#txTimestamp = value;
-  }
-
-  get txHash() {
-    return this.#txHash;
-  }
-
-  set txHash(value) {
-    this.#txHash = value;
-  }
-
-  get publicKey() {
-    return this.#publicKey;
-  }
+  get input() { return this.#input; }
+  get output() { return this.#output; }
+  get amount() { return this.#amount; }
+  get txTimestamp() { return this.#txTimestamp; }
+  get txHash() { return this.#txHash; }
+  get signature() { return this.#signature; }
+  get publicKey() { return this.#publicKey; }
 }
 
 export default Transaction;
